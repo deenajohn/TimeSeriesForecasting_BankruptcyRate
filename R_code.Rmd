@@ -1,0 +1,545 @@
+---
+title: "TS_Project"
+author: "Deena Liz John"
+date: "11/17/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+library(ggplot2)
+library(zoo)
+library(reshape2)
+library(corrplot)
+library(car)
+library(tseries)
+library(forecast)
+path <- "/Users/deena/Documents/Fall_Module2/TS_project/"
+```
+
+Reading in the data and converting it to TS object:
+
+```{r}
+df <- read.csv(file.path(path,"train.csv"), header = TRUE)
+
+# Remove NAs and check consistency of number of rows
+df <- na.omit(df)
+nrow(df) == (2010-1986)*12
+
+# Convert to TS object
+BR_ts <- ts(df['Bankruptcy_Rate'], start = c(1987,1), end = c(2010, 12), frequency = 12)
+```
+
+#---------------------------------------------------------------------------------------------------------
+# Exploratory Data Analysis (EDA)
+
+Plotting Dependent variable: Bankruptcy Rate
+
+```{r, fig.width=6, fig.height=3, warning=FALSE}
+# Plotting TS data
+ggplot() + geom_line(data=data.frame(BR_ts), aes(as.Date(as.yearmon(time(BR_ts))),BR_ts)) +
+  labs(y="Bankruptcy Rate") + 
+  labs(x="Month - Year") + 
+  labs(title="Bankruptcy Rate across years")
+```
+
+
+
+Plotting all predictors across time:
+
+```{r, fig.width=7, fig.height=6, warning=FALSE}
+df2 <- df
+df2[1] <- seq(as.Date("1987/01/01"), by = "month", length.out = 288)
+df2_melt <- melt(df2, id.vars=c("Month"))
+ggplot() + geom_line(data=df2_melt, aes(x=Month, y=value)) + facet_grid(variable ~ .,  scales = "free") + xlab("Month-Year") + ylab("Metric value")
+```
+
+The features `Population` and `House_Price_Index` have an upward trend and seem to be correlated with our predictor variable  `Bankruptcy_Rate`. On the other hand, `Unemployement_Rate` has no particular trend or correlation with `Bankruptcy_Rate`.
+
+We can formally look at the correlation between features with a correlation matrix. 
+Further, it is interesting to look at this matrix for different time frames for the purpose of prediction.
+
+
+```{r}
+# Entire timeframe: 1987 to 2010
+M <- cor(df2[-1])
+corrplot(M, method = "circle", tl.cex = 0.75, tl.col = "black")
+```
+
+```{r}
+# Timeframe: 1995 to 2010
+M <- cor(df2[df2['Month'] > '1995-01-01',][-1])
+corrplot(M, method = "circle", tl.cex = 0.75, tl.col = "black")
+```
+
+```{r}
+# Timeframe: 1993 to 2010
+M <- cor(df2[df2['Month'] > '1993-01-01',][-1])
+corrplot(M, method = "circle", tl.cex = 0.75, tl.col = "black")
+```
+
+For 1993 to 2010, `Bankruptcy_Rate` is much more correlated to the three features. Hence this time period could possibly be more suitable for a forecast model.
+
+```{r}
+par(mfrow=c(2,1))
+acf(BR_ts, lag.max = 48, main = "ACF", ylab ="")
+pacf(BR_ts, lag.max = 48, main = "PACF", ylab = "")
+```
+
+#---------------------------------------------------------------------------------------------------------#
+# Feature Engineering
+
+## Transforming Variables
+
+```{r}
+x <- df2[c('Population', 'House_Price_Index', 'Unemployment_Rate')]
+xreg <- 100*(tail(x, -1) - head(x, -1))/head(x, -1)
+xreg['Month'] <- df2['Month'][df2['Month'] > '1987-01-01']
+```
+
+## Split data into train and test:
+
+Since we need to forecast for two years, let's go back two years and set that as the test data.
+
+Additionally, setting two training datasets : One using the data from 1987, and the other from 1993.
+
+Also, since the data is quite variable over time, let's take log of Bankruptcy Rate for the analysis.
+
+```{r}
+train_1987 <- window(log(BR_ts), start=c(1987,1), end=c(2008,12))
+train_1993 <- window(log(BR_ts), start=c(1993,1), end=c(2008,12))
+
+test <- window(log(BR_ts), start=c(2009,1), end=c(2010,12))
+test2 <- window(BR_ts, start=c(2009,1), end=c(2010,12))
+#train_1987 <- window(BR_ts, start=c(1987,1), end=c(2008,12))
+#train_1993 <- window(BR_ts, start=c(1993,1), end=c(2008,12))
+
+#test <- window(BR_ts, start=c(2009,1), end=c(2010,12))
+
+```
+
+# Model Building
+
+Differencing the xreg variables in test:
+
+```{r}
+xreg_test_diff <- diff(as.matrix(df2[df2['Month'] > '2009-01-01' & df2['Month'] < '2011-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')]), lag = 12, differences = 1)
+xreg_test <- df2[df2['Month'] >= '2009-01-01' & df2['Month'] < '2011-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')]
+
+xreg_test_change_diff <- diff(as.matrix(xreg[xreg['Month'] > '2009-01-01' & xreg['Month'] < '2011-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')]), lag = 12, differences = 1)
+xreg_test_change <- xreg[xreg['Month'] >= '2009-01-01' & xreg['Month'] < '2011-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')]
+```
+
+
+Fitting auto SARIMAX models on Training data from 1993:
+
+No differencing:
+```{r}
+m1 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+m2 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')])
+m3 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')])
+m4 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')])
+m5 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population')])
+m6 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index')])
+m7 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+
+pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test)
+pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test[,c('Population', 'House_Price_Index')])
+pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test[,c('Unemployment_Rate')])
+
+sqrt(mean((exp(pred1$pred) - exp(test))^2))
+sqrt(mean((exp(pred2$pred) - exp(test))^2))
+sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+#sqrt(mean((exp(pred6$pred) - exp(test))^2))
+sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+
+With differencing d=1 and D=1:
+
+```{r}
+m1 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')], d=1, D=1)
+m2 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')], d=1, D=1)
+m3 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')], d=1, D=1)
+m4 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')], d=1, D=1)
+m5 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population')], d=1, D=1)
+m6 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index')], d=1, D=1)
+m7 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')], d=1, D=1)
+
+pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test)
+pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test[,c('Population', 'House_Price_Index')])
+pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test[,c('Unemployment_Rate')])
+
+sqrt(mean((exp(pred1$pred) - exp(test))^2))
+sqrt(mean((exp(pred2$pred) - exp(test))^2))
+sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+sqrt(mean((exp(pred6$pred) - exp(test))^2))
+sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+
+With differencing D=1:
+
+```{r}
+m1 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')], D=1)
+m2 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')], D=1)
+m3 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')], D=1)
+m4 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')], D=1)
+m5 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population')], D=1)
+m6 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index')], D=1)
+m7 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')],  D=1)
+
+#pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test)
+#pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test[,c('Population', 'House_Price_Index')])
+#pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test[,c('Unemployment_Rate')])
+
+#sqrt(mean((exp(pred1$pred) - exp(test))^2))
+#sqrt(mean((exp(pred2$pred) - exp(test))^2))
+#sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+sqrt(mean((exp(pred6$pred) - exp(test))^2))
+#sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+
+
+Training data from 1987:
+
+```{r}
+m1 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+m2 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')])
+m3 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')])
+m4 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')])
+m5 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('Population')])
+m6 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index')])
+m7 <- auto.arima(train_1987, xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+
+pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test)
+pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test[,c('Population', 'House_Price_Index')])
+pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test[,c('Unemployment_Rate')])
+
+sqrt(mean((exp(pred1$pred) - exp(test))^2))
+sqrt(mean((exp(pred2$pred) - exp(test))^2))
+sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+#sqrt(mean((exp(pred6$pred) - exp(test))^2))
+sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+
+
+
+## Model Building with transformed variables (taken % change)
+
+Fitting auto SARIMAX models on Training data from 1993:
+
+No differencing:
+
+```{r}
+m1 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+m2 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')])
+m3 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')])
+m4 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')])
+m5 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population')])
+m6 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index')])
+m7 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+
+pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test_change)
+pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test_change[,c('Population', 'House_Price_Index')])
+pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test_change[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test_change[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test_change[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test_change[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test_change[,c('Unemployment_Rate')])
+
+sqrt(mean((exp(pred1$pred) - exp(test))^2))
+sqrt(mean((exp(pred2$pred) - exp(test))^2))
+sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+sqrt(mean((exp(pred6$pred) - exp(test))^2))
+sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+
+With differencing d=1 and D=1:
+
+```{r}
+m1 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')], d=1, D=1)
+m2 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')],d=1, D=1)
+m3 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')], d=1, D=1)
+m4 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')], d=1, D=1)
+m5 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population')],d=1, D=1)
+m6 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index')],d=1, D=1)
+m7 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate')],d=1, D=1)
+
+pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test_change)
+pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test_change[,c('Population', 'House_Price_Index')])
+pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test_change[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test_change[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test_change[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test_change[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test_change[,c('Unemployment_Rate')])
+
+sqrt(mean((exp(pred1$pred) - exp(test))^2))
+sqrt(mean((exp(pred2$pred) - exp(test))^2))
+sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+sqrt(mean((exp(pred6$pred) - exp(test))^2))
+sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+
+With differencing D=1:
+
+```{r}
+m1 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')], D=1)
+m2 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')], D=1)
+m3 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index', 'Unemployment_Rate')], D=1)
+m4 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population','Unemployment_Rate')], D=1)
+m5 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population')], D=1)
+m6 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index')], D=1)
+m7 <- auto.arima(train_1993, xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate')], D=1)
+
+#pred1 <-  predict(m1, n.ahead = 24, newxreg = xreg_test_change)
+#pred2 <-  predict(m2, n.ahead = 24, newxreg = xreg_test_change[,c('Population', 'House_Price_Index')])
+#pred3 <-  predict(m3, n.ahead = 24, newxreg = xreg_test_change[,c('House_Price_Index', 'Unemployment_Rate')])
+pred4 <-  predict(m4, n.ahead = 24, newxreg = xreg_test_change[,c('Population','Unemployment_Rate')])
+pred5 <-  predict(m5, n.ahead = 24, newxreg = xreg_test_change[,c('Population')])
+pred6 <-  predict(m6, n.ahead = 24, newxreg = xreg_test_change[,c('House_Price_Index')])
+pred7 <-  predict(m7, n.ahead = 24, newxreg = xreg_test_change[,c('Unemployment_Rate')])
+
+#sqrt(mean((exp(pred1$pred) - exp(test))^2))
+#sqrt(mean((exp(pred2$pred) - exp(test))^2))
+#sqrt(mean((exp(pred3$pred) - exp(test))^2))
+sqrt(mean((exp(pred4$pred) - exp(test))^2))
+sqrt(mean((exp(pred5$pred) - exp(test))^2))
+sqrt(mean((exp(pred6$pred) - exp(test))^2))
+sqrt(mean((exp(pred7$pred) - exp(test))^2))
+```
+0.003700048
+0.003644708
+
+Best models so far:
+
+```{r}
+#0.003323823
+f1 <- auto.arima(train_1993, xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')], d=1, D=1)
+f1_pred <-  predict(f1, n.ahead = 24, newxreg = xreg_test[c('Unemployment_Rate')])
+sqrt(mean((exp(f1_pred$pred) - exp(test))^2))
+#ARIMA(2,1,1)(2,1,2)[12]
+
+#NOTE: ALl models built with D=1, d=1 using % change on 1993 train data gave best and equally good results.
+# All are ARIMA(1,1,1)(2,1,2)[12] models with different variable combinations used
+#Best with only unemployement, followed by with each other variables individually
+
+```
+
+Plot fitted values:
+```{r}
+f <- exp(train_1993 - f1$residuals) #fitted values
+par(mfrow=c(1,1))
+plot(exp(train_1993), type = "l")
+points(f, type = "l", col = "red")
+legend("bottomright", legend = c("Observed", "Predicted"), lty = 1, col = c("black", "red"), cex = 0.5)
+```
+
+Plot whole data and prediction:
+```{r}
+par(mfrow=c(1,1))
+plot(BR_ts, type = "l")
+points(exp(f1_pred$pred), type = "l", col = "red")
+```
+
+
+##Trying models manually
+
+Trials with normal data:
+
+```{r}
+#ARIMA(2,1,1)(2,1,2)[12] - 0.003323823 with only unemployement
+
+m11 <- arima(train_1993, order = c(2,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+m11_pred <-  predict(m11, n.ahead = 24, newxreg = xreg_test[c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+sqrt(mean((exp(m11_pred$pred) - exp(test))^2))
+
+m12 <- arima(train_1993, order = c(2,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate', 'Population')])
+m12_pred <-  predict(m12, n.ahead = 24, newxreg = xreg_test[c('Unemployment_Rate', 'Population')])
+sqrt(mean((exp(m12_pred$pred) - exp(test))^2))
+
+m13 <- arima(train_1993, order = c(2,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate', 'House_Price_Index')])
+m13_pred <-  predict(m13, n.ahead = 24, newxreg = xreg_test[c('Unemployment_Rate', 'House_Price_Index')])
+sqrt(mean((exp(m13_pred$pred) - exp(test))^2))
+
+m14 <- arima(train_1993, order = c(2,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')])
+m14_pred <-  predict(m14, n.ahead = 24, newxreg = xreg_test[c('Population', 'House_Price_Index')])
+sqrt(mean((exp(m14_pred$pred) - exp(test))^2))
+
+m15 <- arima(train_1993, order = c(2,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index')])
+m15_pred <-  predict(m15, n.ahead = 24, newxreg = xreg_test[c('House_Price_Index')])
+sqrt(mean((exp(m15_pred$pred) - exp(test))^2))
+
+m16 <- arima(train_1993, order = c(2,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Population')])
+m16_pred <-  predict(m16, n.ahead = 24, newxreg = xreg_test[c('Population')])
+sqrt(mean((exp(m16_pred$pred) - exp(test))^2))
+
+m17 <- arima(train_1993, order = c(1,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+m17_pred <-  predict(m17, n.ahead = 24, newxreg = xreg_test[c('Unemployment_Rate')])
+sqrt(mean((exp(m17_pred$pred) - exp(test))^2))
+```
+
+# Trail with % changed data:
+
+```{r}
+#ARIMA(1,1,1)(2,1,2)[12] -- 0.003586425 with only Unemployement
+#ARIMA(2,1,1)(2,1,2)[12] -- 0.004143049
+#ARIMA(2,1,2)(2,1,2)[12] -- 0.00421501
+
+
+m11 <- arima(train_1993, order = c(2,1,2), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+m11_pred <-  predict(m11, n.ahead = 24, newxreg = xreg_test_change[c('Population', 'House_Price_Index', 'Unemployment_Rate')])
+sqrt(mean((exp(m11_pred$pred) - exp(test))^2))
+
+m12 <- arima(train_1993, order = c(2,1,2), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate', 'Population')])
+m12_pred <-  predict(m12, n.ahead = 24, newxreg = xreg_test_change[c('Unemployment_Rate', 'Population')])
+sqrt(mean((exp(m12_pred$pred) - exp(test))^2))
+
+m13 <- arima(train_1993, order = c(2,1,2), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate', 'House_Price_Index')])
+m13_pred <-  predict(m13, n.ahead = 24, newxreg = xreg_test_change[c('Unemployment_Rate', 'House_Price_Index')])
+sqrt(mean((exp(m13_pred$pred) - exp(test))^2))
+
+m14 <- arima(train_1993, order = c(2,1,2), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population', 'House_Price_Index')])
+m14_pred <-  predict(m14, n.ahead = 24, newxreg = xreg_test_change[c('Population', 'House_Price_Index')])
+sqrt(mean((exp(m14_pred$pred) - exp(test))^2))
+
+m15 <- arima(train_1993, order = c(2,1,2), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('House_Price_Index')])
+m15_pred <-  predict(m15, n.ahead = 24, newxreg = xreg_test_change[c('House_Price_Index')])
+sqrt(mean((exp(m15_pred$pred) - exp(test))^2))
+
+m16 <- arima(train_1993, order = c(2,1,2), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Population')])
+m16_pred <-  predict(m16, n.ahead = 24, newxreg = xreg_test_change[c('Population')])
+sqrt(mean((exp(m16_pred$pred) - exp(test))^2))
+
+m17 <- arima(train_1993, order = c(1,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+m17_pred <-  predict(m17, n.ahead = 24, newxreg = xreg_test_change[c('Unemployment_Rate')])
+sqrt(mean((exp(m17_pred$pred) - exp(test))^2))
+```
+
+
+#Trying with only unemployement:
+
+```{r}
+#0.003323823 -- (2,1,1)(2,1,2)
+#0.003306139 -- (2,1,2)(2,1,2)
+#0.003266324 -- (0,1,1)(2,1,2)
+#0.003219882 -- (1,1,1)(2,1,2)
+#0.003172182 -- (0,1,2)(2,1,2)
+#0.003163958 -- (0,1,3)(2,1,2)
+#0.003137944 -- (0,1,4)(2,1,2)
+#0.002599472 -- (0,1,15)(2,1,2)
+#0.002575927 -- (0,1,14)(2,1,2)
+#0.00253076 -- (0,1,13)(2,1,2)
+
+m17 <- arima(train_1993, order = c(0,1,13), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+m17_pred <-  predict(m17, n.ahead = 24, newxreg = xreg_test[c('Unemployment_Rate')])
+sqrt(mean((exp(m17_pred$pred) - exp(test))^2))
+
+#0.003586425 -- (1,1,1)(2,1,2)
+#0.003345094 -- (1,1,3)(2,1,2)
+
+#m17 <- arima(train_1993, order = c(0,1,5), seasonal = list(order = c(2,1,2), period = 12), xreg = xreg[xreg['Month'] >= '1993-01-01' & xreg['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+#m17_pred <-  predict(m17, n.ahead = 24, newxreg = xreg_test_change[c('Unemployment_Rate')])
+#sqrt(mean((exp(m17_pred$pred) - exp(test))^2))
+
+```
+
+Best Model:
+```{r}
+m_final <- arima(train_1993, order = c(0,1,13), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1993-01-01' & df2['Month'] < '2009-01-01',][c('Unemployment_Rate')])
+m_final_pred <-  predict(m_final, n.ahead = 24, newxreg = xreg_test[c('Unemployment_Rate')])
+sqrt(mean((exp(m_final_pred$pred) - exp(test))^2))
+```
+
+```{r}
+log(BR_ts)
+test_df <- read.csv(file.path(path,"test.csv"), header = TRUE)
+
+m_new <- arima(log(BR_ts), order = c(0,1,13), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[c('Unemployment_Rate')])
+
+m_pred_2yrs <-  predict(m_new, n.ahead = 24, newxreg = test_df[c('Unemployment_Rate')])
+sqrt(mean((exp(m_final_pred$pred) - exp(test))^2))
+
+```
+
+```{r}
+m_final <- arima(exp(train_1987), order = c(1,1,1), seasonal = list(order = c(2,1,2), period = 12), xreg = df2[df2['Month'] >= '1987-01-01' & df2['Month'] < '2009-01-01',][c('House_Price_Index')])
+m_final_pred <-  predict(m_final, n.ahead = 24, newxreg = xreg_test[c('House_Price_Index')])
+sqrt(mean((exp(m_final_pred$pred) - exp(test))^2))
+#sqrt(mean((m_final_pred$pred - exp(test))^2))
+#0.003295595
+#0.008353351
+```
+
+Plot best data and prediction:
+```{r}
+par(mfrow=c(1,1))
+plot(BR_ts, type = "l", main = "RMSE 0.00253076 - SARIMA(0,1,13)(2,1,2)[12]")
+points(exp(m_final_pred$pred), type = "l", col = "red")
+```
+
+## Checking model assumptions:
+
+### (i) Test for Zero-Mean: t test
+
+```{r, comment=''}
+e <- exp(m_final$residuals)
+#e <- m_final$residuals
+t.test(e)
+```
+
+Clearly p-value is high considering a significance level of 0.05. Hence we cannot reject the null hypothesis and the residuals have zero mean. This assumption is satisfied.
+
+### (ii) Homoscedasticity
+
+```{r, comment=''}
+par(mfrow=c(1,1))
+plot(e, main="Residuals vs t", ylab="")
+#abline(v=c(1966, 1976, 1986), lwd=3, col="red")
+group <- c(rep(1,40),rep(2,40),rep(3,40),rep(4,40), rep(5,32))
+levene.test(exp(e), group)#Levene
+```
+
+### (iii) Zero-Correlation
+
+```{r, comment=''}
+tsdiag(m_final)
+```
+
+### (iv) Normality
+
+```{r, comment=''}
+par(mfrow=c(1,1))
+qqnorm(e, main="QQ-plot of Residuals")
+qqline(e, col = "red")
+shapiro.test(e) #SW test
+```
+
+
+Also, the p-value from Shapiro-Wilk test is greater than 0.05 (assumed significance level) and so we fail to reject the null hypothesis. Hence the normality assumption is satisfied.
+
